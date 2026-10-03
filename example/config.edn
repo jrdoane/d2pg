@@ -1,0 +1,23 @@
+;; Example d2pg config. Run with: clojure -M -m d2pg example/config.edn
+{:datomic {:client {:server-type :datomic-local
+                    :system "dev"
+                    :storage-dir "/absolute/path/to/datomic-local-storage"}
+           :db-name "app"}
+
+ ;; Passed to next.jdbc/get-datasource.
+ :postgres {:jdbcUrl "jdbc:postgresql://localhost:5432/app_replica"}
+
+ :pg-schema "public"          ; target schema; created if missing
+ :replicator-id "app"         ; names this replicator's checkpoint row
+ :poll-interval-ms 1000       ; idle wait between log polls once caught up
+ :batch-txs 100               ; transactions applied per PostgreSQL transaction
+ :pull-batch-size 1000        ; entities pulled per Datomic query
+
+ :tables
+ {:person {:attrs   [:person/*           ; every attribute in :person
+                     :address/street]    ; plus individual attributes
+           :exclude [:person/password-hash]
+           :require [:person/email]      ; rows only for entities with all of these
+           :columns {:person/name   {:name "full_name"}
+                     :person/status {:as :ident}}}   ; enum ref -> "status/active"
+  :address {:attrs [:address/*]}}}

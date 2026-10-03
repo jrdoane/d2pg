@@ -9,8 +9,10 @@
             [next.jdbc :as jdbc]))
 
 (def ^:private schema-attrs
-  "Attributes whose assertion may install or change an attribute definition."
-  #{:db/ident :db/valueType :db/cardinality :db/unique :db.install/attribute})
+  "Attributes whose assertion may install or change an attribute definition.
+  :db/ident is deliberately absent: it is asserted for every enum value, and
+  an attribute installation always carries :db/valueType as well."
+  #{:db/valueType :db/cardinality :db/unique :db.install/attribute})
 
 (defn- schema-change? [model datoms]
   (let [id->ident (get-in model [:schema :id->ident])]
@@ -58,6 +60,6 @@
           (doseq [[table-key eids] (touched model datoms)]
             (sync/sync-entities! tx db model table-key eids pull-batch-size))
           (pg/write-checkpoint! tx pg-schema replicator-id last-t mapping-hash))
-        (reset! state {:model model :t last-t})
+        (swap! state assoc :model model :t last-t)
         (log/debug "Applied" (count txs) "transactions through t" last-t)
         (count txs)))))

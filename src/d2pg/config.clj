@@ -40,18 +40,20 @@
 (s/def ::poll-interval-ms pos-int?)
 (s/def ::batch-txs pos-int?)
 (s/def ::pull-batch-size pos-int?)
+(s/def ::max-backoff-ms pos-int?)
 
 (s/def ::config
   (s/keys :req-un [::datomic ::postgres ::tables]
           :opt-un [::pg-schema ::replicator-id ::poll-interval-ms
-                   ::batch-txs ::pull-batch-size]))
+                   ::batch-txs ::pull-batch-size ::max-backoff-ms]))
 
 (def defaults
   {:pg-schema "public"
    :replicator-id "default"
    :poll-interval-ms 1000
    :batch-txs 100
-   :pull-batch-size 1000})
+   :pull-batch-size 1000
+   :max-backoff-ms 60000})
 
 (defn validate
   "Returns config with defaults applied, or throws ex-info describing the

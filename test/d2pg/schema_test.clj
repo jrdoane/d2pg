@@ -2,6 +2,7 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [d2pg.config :as config]
+            [d2pg.core :as core]
             [d2pg.ddl :as ddl]
             [d2pg.schema :as schema]))
 
@@ -92,8 +93,30 @@
   (is (= "app_person" (schema/sql-name "app.person"))))
 
 (deftest ddl
-  (let [stmts (ddl/statements (model {:person {:attrs [:person/email :person/tags]}}))]
+  (let [m (model {:person {:attrs [:person/email :person/tags]}})
+        stmts (ddl/statements m)]
     (is (some #(str/includes? % "CREATE TABLE IF NOT EXISTS \"public\".\"person\" (\"db_id\" bigint PRIMARY KEY)") stmts))
     (is (some #(str/includes? % "ADD COLUMN IF NOT EXISTS \"email\" text") stmts))
     (is (some #(str/includes? % "UNIQUE (\"email\") DEFERRABLE INITIALLY DEFERRED") stmts))
-    (is (some #(str/includes? % "\"person_tags\" (\"db_id\" bigint NOT NULL, \"value\" text NOT NULL") stmts))))
+    (is (some #(str/includes? % "\"person_tags\" (\"db_id\" bigint NOT NULL, \"value\" text NOT NULL") stmts))
+    (is (not-any? #(str/includes? % "d2pg_checkpoint") stmts)
+        "table DDL leaves the checkpoint table to checkpoint-statements")
+    (is (= ["person" "person_tags"] (ddl/table-names m)))
+    (is (= ["DROP TABLE IF EXISTS \"public\".\"old\""] (ddl/drop-statements "public" ["old"])))
+    (is (= ["ALTER TABLE \"stage\".\"person\" SET SCHEMA \"public\""
+            "DROP SCHEMA \"stage\""]
+           (ddl/move-statements "stage" "public" ["person"])))))
+
+(deftest mapping-hash
+  (let [cfg {:datomic {:client {} :db-name "x"} :postgres {}
+             :tables {:person {:attrs [:person/name] :columns {:person/name {:name "n"}}}
+                      :address {:attrs [:address/*]}}}]
+    (is (= 64 (count (core/mapping-hash cfg))))
+    (testing "depends only on the mapping, not on map construction order or other keys"
+      (is (= (core/mapping-hash cfg)
+             (core/mapping-hash (-> cfg
+                                    (assoc :poll-interval-ms 5 :postgres {:jdbcUrl "x"})
+                                    (update :tables #(into (array-map) (reverse %))))))))
+    (is (not= (core/mapping-hash cfg) (core/mapping-hash (assoc cfg :pg-schema "other"))))
+    (is (not= (core/mapping-hash cfg)
+              (core/mapping-hash (assoc-in cfg [:tables :person :columns :person/name :name] "m"))))))

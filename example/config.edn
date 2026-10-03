@@ -1,15 +1,17 @@
-;; Example d2pg config. Run with: clojure -M -m d2pg example/config.edn
+;; Example d2pg config. Run with: clojure -M:run example/config.edn
 {:datomic {:client {:server-type :datomic-local
                     :system "dev"
                     :storage-dir "/absolute/path/to/datomic-local-storage"}
            :db-name "app"}
 
- ;; Passed to next.jdbc/get-datasource.
+ ;; Passed to next.jdbc/get-datasource. reWriteBatchedInserts is turned on
+ ;; unless you set it here yourself.
  :postgres {:jdbcUrl "jdbc:postgresql://localhost:5432/app_replica"}
 
  :pg-schema "public"          ; target schema; created if missing
- :replicator-id "app"         ; names this replicator's checkpoint row
+ :replicator-id "app"         ; names this replicator's checkpoint row and staging schema
  :poll-interval-ms 1000       ; idle wait between log polls once caught up
+ :max-backoff-ms 60000        ; cap on the retry delay after a failed step
  :batch-txs 100               ; transactions applied per PostgreSQL transaction
  :pull-batch-size 1000        ; entities pulled per Datomic query
 

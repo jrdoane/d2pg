@@ -1,5 +1,11 @@
 # d2pg
 
+> [!WARNING]
+> **This project is a work in progress.** Backwards compatibility is not an
+> objective at the moment: the API, configuration format, and PostgreSQL
+> output may change in breaking ways between any two commits. Pin to a
+> specific commit if you depend on it.
+
 Replicates a Datomic database into PostgreSQL. You declare which tables you
 want and which attributes go in them, as data; d2pg derives the rest (column
 types, join tables, unique constraints, column names) from the schema in the

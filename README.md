@@ -113,3 +113,10 @@ clojure -M:test
 
 CI runs the same suite against a PostgreSQL service container; see
 `.github/workflows/test.yml`.
+
+## License
+
+Copyright 2026 Jonathan Doane
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Redistributions must
+retain the attribution in [NOTICE](NOTICE).

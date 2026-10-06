@@ -46,10 +46,12 @@
     (instance? java.net.URI v) (str v)
     :else v))
 
-(defn- jsonb [v]
+(defn jsonb
+  "A jsonb parameter holding v, which must be JSON-writable."
+  [v]
   (doto (PGobject.)
     (.setType "jsonb")
-    (.setValue (json/write-str (mapv json-value v)))))
+    (.setValue (json/write-str v))))
 
 (defn ->jdbc
   "Coerces a pulled Datomic value to something the PostgreSQL driver accepts
@@ -65,5 +67,5 @@
         :db.type/uri     (str v)
         :db.type/instant (Timestamp. (.getTime ^Date v))
         :db.type/bigint  (bigdec v)
-        :db.type/tuple   (jsonb v)
+        :db.type/tuple   (jsonb (mapv json-value v))
         v))))

@@ -64,26 +64,72 @@
           (quote-ident "value") " " pg-type " NOT NULL, "
           "PRIMARY KEY (" (quote-ident schema/pk-column) ", " (quote-ident "value") "))"))))
 
+(def ^:private checkpoint-columns
+  ["basis_t bigint NOT NULL"
+   "mapping_hash text NOT NULL"
+   "source_id text"
+   "tables jsonb NOT NULL DEFAULT '[]'"
+   "shape jsonb"
+   "updated_at timestamptz NOT NULL DEFAULT now()"])
+
 (defn checkpoint-statements
-  "Creates the target schema and checkpoint table, and migrates older
-  checkpoint tables forward."
+  "Creates the target schema and checkpoint table. Like table DDL, columns
+  are added if missing, so an older checkpoint table gains new ones."
   [pg-schema]
   (let [checkpoint (qualified pg-schema checkpoint-table)]
-    [(str "CREATE SCHEMA IF NOT EXISTS " (quote-ident pg-schema))
-     (str "CREATE TABLE IF NOT EXISTS " checkpoint
-          " (replicator_id text PRIMARY KEY,"
-          " basis_t bigint NOT NULL,"
-          " mapping_hash text NOT NULL,"
-          " tables jsonb NOT NULL DEFAULT '[]',"
-          " updated_at timestamptz NOT NULL DEFAULT now())")
-     (str "ALTER TABLE " checkpoint
-          " ADD COLUMN IF NOT EXISTS tables jsonb NOT NULL DEFAULT '[]'")]))
+    (concat
+     [(str "CREATE SCHEMA IF NOT EXISTS " (quote-ident pg-schema))
+      (str "CREATE TABLE IF NOT EXISTS " checkpoint
+           " (replicator_id text PRIMARY KEY, " (str/join ", " checkpoint-columns) ")")]
+     (for [c checkpoint-columns]
+       (str "ALTER TABLE " checkpoint " ADD COLUMN IF NOT EXISTS " c)))))
 
 (defn statements
   "All table DDL for model, in order. The checkpoint table is separate; see
   checkpoint-statements."
   [{:keys [pg-schema tables]}]
   (vec (mapcat #(table-statements pg-schema %) (vals tables))))
+
+(defn- definition [pg-type unique? attr as]
+  (str/join " " (cond-> [pg-type]
+                  unique? (conj "unique")
+                  true (conj (subs (str attr) 1))
+                  as (conj (str "as " (name as))))))
+
+(defn shape
+  "The layout of the model's tables, {table {column definition}}, as
+  recorded in the checkpoint. A definition gives the column's type,
+  uniqueness and source attribute."
+  [{:keys [tables]}]
+  (into {}
+        (mapcat (fn [{:keys [sql-name columns join-tables]}]
+                  (cons [sql-name (into {schema/pk-column "bigint"}
+                                        (for [{:keys [column pg-type unique? attr as]} columns]
+                                          [column (definition pg-type unique? attr as)]))]
+                        (for [{:keys [join-table pg-type attr as]} join-tables]
+                          [join-table {schema/pk-column "bigint"
+                                       "value" (definition pg-type false attr as)}]))))
+        (vals tables)))
+
+(defn additive?
+  "Can tables shaped like before become shaped like after by adding columns
+  and tables? Only if every column of before is in after, defined the same."
+  [before after]
+  (every? (fn [[table columns]]
+            (every? (fn [[column definition]]
+                      (= definition (get-in after [table column])))
+                    columns))
+          before))
+
+(defn evolve-statements
+  "DDL that evolves tables shaped like before into model, for only the tables
+  whose shape differs: DDL locks a table even when it changes nothing."
+  [model before]
+  (let [after (shape model)
+        changed? (fn [{:keys [sql-name join-tables]}]
+                   (some #(not= (get before %) (get after %))
+                         (cons sql-name (map :join-table join-tables))))]
+    (statements (update model :tables #(into {} (filter (comp changed? val)) %)))))
 
 (defn drop-statements
   "Drops the named tables in pg-schema (used before a full re-snapshot)."

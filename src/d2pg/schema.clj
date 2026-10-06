@@ -15,8 +15,7 @@
   [:db/id :db/ident
    {:db/valueType [:db/ident]}
    {:db/cardinality [:db/ident]}
-   {:db/unique [:db/ident]}
-   :db/isComponent])
+   {:db/unique [:db/ident]}])
 
 (defn read-schema
   "Returns {:attrs {ident attr-info} :id->ident {eid ident}} for every
@@ -33,8 +32,7 @@
                            :id (:db/id a)
                            :value-type (get-in a [:db/valueType :db/ident])
                            :cardinality (get-in a [:db/cardinality :db/ident])
-                           :unique (get-in a [:db/unique :db/ident])
-                           :component? (boolean (:db/isComponent a))})))]
+                           :unique (get-in a [:db/unique :db/ident])})))]
     {:attrs (into {} (map (juxt :ident identity)) attrs)
      :id->ident (into {} (map (juxt :id :ident)) attrs)}))
 

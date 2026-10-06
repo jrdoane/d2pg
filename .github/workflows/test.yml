@@ -30,7 +30,7 @@ jobs:
           java-version: "21"
       - uses: DeLaGuardo/setup-clojure@13.0
         with:
-          cli: latest
+          cli: 1.12.5.1645
       - uses: actions/cache@v4
         with:
           path: |
@@ -38,4 +38,6 @@ jobs:
             ~/.gitlibs
           key: deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
           restore-keys: deps-${{ runner.os }}-
+      - run: clojure -M:lint
       - run: clojure -M:test
+      - run: clojure -T:build uber

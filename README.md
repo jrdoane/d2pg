@@ -13,9 +13,10 @@ source Datomic database. It takes an initial snapshot, then tails the
 transaction log, keeping PostgreSQL at the **current state** of the source.
 
 The source is reached through the Datomic **Client API**, so it works with
-Datomic Local, Datomic Cloud, and Datomic Pro via peer-server. `deps.edn`
-includes `com.datomic/local`; add `com.datomic/client-pro` or
-`com.datomic/client-cloud` for those deployments.
+Datomic Local, Datomic Cloud, and Datomic Pro via peer-server. The library
+doesn't pick a client: add `com.datomic/local`, `com.datomic/client-pro` or
+`com.datomic/client-cloud` to your application. The `:run`, `:local` and
+`:test` aliases use Datomic Local.
 
 ## Running
 
@@ -23,19 +24,30 @@ includes `com.datomic/local`; add `com.datomic/client-pro` or
 clojure -M:run example/config.edn
 ```
 
-The `:run` alias adds a simple SLF4J logging backend. The library itself
-logs through `clojure.tools.logging` and leaves the backend to the host
-application, so `clojure -M -m d2pg example/config.edn` also works and falls
-back to `java.util.logging`.
+The `:run` alias adds Datomic Local and a simple SLF4J logging backend. The
+library itself logs through `clojure.tools.logging` and leaves the backend to
+the host application, so `clojure -M:local -m d2pg example/config.edn` also
+works and falls back to `java.util.logging`.
+
+To build a standalone jar (Datomic Local and SLF4J included):
+
+```sh
+clojure -T:build uber
+java -jar target/d2pg-0.1.<n>-standalone.jar example/config.edn
+```
+
+`clojure -T:build jar` builds the library jar and pom. Versions are
+`0.1.<commit count>`.
 
 Or embed it:
 
 ```clojure
 (require '[d2pg.core :as d2pg])
 
-(def rep (d2pg/start! config))  ; snapshot if needed, then tail in the background
-(d2pg/basis-t rep)              ; last Datomic t applied
-(d2pg/last-error rep)           ; exception from the latest failed step, or nil
+(def rep (d2pg/start! config))  ; snapshot if needed, then tail, all in the background
+(d2pg/basis-t rep)              ; last Datomic t applied, nil until the snapshot is done
+(d2pg/last-error rep)           ; exception from the latest failed attempt, or nil
+(d2pg/status rep)               ; {:basis-t :caught-up? :txs-applied :last-step-at :error}
 (d2pg/stop! rep)
 
 ;; Or drive it by hand:
@@ -51,7 +63,7 @@ explicit; each one lists attribute patterns:
 
 | Key | Meaning |
 |---|---|
-| `:attrs` | Attributes to map. `:ns/*` selects every attribute in a namespace, including ones installed later. |
+| `:attrs` | Attributes to map. `:ns/*` selects every attribute in a namespace, including ones installed later (see [Wildcards](#wildcards)). |
 | `:exclude` | Attributes to drop after expanding `:attrs`. |
 | `:require` | Only entities that have **all** of these get a row. Without it, any mapped attribute is enough. |
 | `:columns` | Per-attribute overrides: `:name` (column name), `:as :ident` (render an enum ref as its ident text), `:pg-type` (any PostgreSQL type the natural type casts to, e.g. `"date"` for an instant or `"text"` for a long). |
@@ -62,7 +74,9 @@ explicit; each one lists attribute patterns:
 - **Primary key**: `db_id bigint`, the Datomic entity id.
 - **Column names**: snake_case of the attribute name (`:person/is-active?` → `is_active`).
   Attributes from a different namespace than the table are prefixed (`:address/street` in
-  `:person` → `address_street`). Collisions are reported at startup.
+  `:person` → `address_street`). Collisions are reported at startup. Table, column
+  and join table names must fit PostgreSQL's 63-byte identifier limit rather than
+  be silently truncated; use a `:name` override to shorten one.
 - **Types**: string/keyword/symbol/uri → `text`, long/ref → `bigint`, boolean → `boolean`,
   instant → `timestamptz`, uuid → `uuid`, double → `double precision`, float → `real`,
   bigint/bigdec → `numeric`, bytes → `bytea` (Datomic Pro only), tuple → `jsonb`.
@@ -72,6 +86,17 @@ explicit; each one lists attribute patterns:
 - **`:db/unique`** → a deferred `UNIQUE` constraint.
 - Refs are plain `bigint` columns; there are no foreign key constraints.
 
+### Wildcards
+
+An attribute named in `:attrs`, `:columns` or `:require` must map cleanly, or
+startup fails. An attribute that only a `:ns/*` wildcard matches is skipped
+with a warning if it can't be mapped: its column name collides with another,
+its name is too long, or its value type is unsupported. That way an attribute
+installed in the source never stops replication. Named attributes claim names
+first; among wildcard matches, the attribute installed first keeps a contested
+name, so a new attribute never takes over a column already being replicated.
+Add a `:columns` override or an `:exclude` to map or silence a skipped one.
+
 ## How it works
 
 Snapshot and tail share one code path: for each entity touched, pull it from a
@@ -80,45 +105,63 @@ if not. Retractions, card-many changes, `:require` membership and
 `:db/retractEntity` all go through that path.
 
 - **Snapshot** builds the mapped tables in a staging schema
-  (`d2pg_staging_<replicator-id>`), loads them from one db value, then drops the
-  previous tables, moves the new ones into place and writes the checkpoint, all
-  in one PostgreSQL transaction. Readers of the old tables are blocked only for
-  the final swap, not for the load. Tables an earlier snapshot created that the
-  mapping no longer names (renamed or removed tables) are dropped too.
+  (`d2pg_staging_<replicator-id>`) from one db value, streaming entities in
+  batches, then drops the previous tables, moves the new ones into place and
+  writes the checkpoint, all in one PostgreSQL transaction. Readers of the old
+  tables are blocked only for that swap. Tables an earlier snapshot created that
+  the mapping no longer names are dropped too. A snapshot only ever replaces
+  tables its replicator created: if a mapped table already exists and was made
+  by anyone else, it stops with an error rather than drop it.
 - **Tail** reads up to `:batch-txs` transactions from the log, re-pulls the
   touched entities as of the last one, and writes rows and the new checkpoint
   in one PostgreSQL transaction, so a restart never applies a transaction
   twice. A failed step changes nothing and is retried.
 - **Checkpoint**: `<pg-schema>.d2pg_checkpoint` holds the last applied `t`, a
-  hash of the mapping, and the tables the last snapshot created. The next start
-  takes a fresh snapshot if the mapping changed or any of those tables is
-  missing. Delete the checkpoint row to force one.
-- **Schema changes**: when the log installs new attributes, the model is
-  re-resolved and columns or join tables are added as needed. Changes are
-  additive only.
-- **Background mode** (`start!`) polls every `:poll-interval-ms` once caught
-  up. After a failed step it backs off exponentially up to `:max-backoff-ms`
-  (default 60 s) and exposes the exception through `last-error`.
+  hash of the mapping, the source database's id, and the tables the last
+  snapshot created along with their columns. The next start takes a fresh
+  snapshot if the mapping changed, the tables can't follow the schema by adding
+  columns, or any table is missing. It refuses to resume against a different
+  Datomic database. To force a snapshot, run
+  `UPDATE <pg-schema>.d2pg_checkpoint SET mapping_hash = '' WHERE replicator_id = '<id>'`.
+- **Schema changes**: when the log installs or renames attributes, the model is
+  re-resolved. New attributes add columns or join tables, touching only the
+  tables that change. Changes columns can't follow (a cardinality change, a
+  renamed attribute, uniqueness dropped) take a full snapshot instead, whether
+  they happen while tailing or while stopped. Renaming an enum value updates the
+  `:as :ident` columns that show it.
+- **One instance per replicator**: each step checks that the checkpoint is where
+  it left it, so a second process with the same `:replicator-id` fails its steps
+  instead of corrupting the target. Snapshots sharing a staging schema wait for
+  each other.
+- **Background mode** (`start!`) connects and snapshots on its own thread, so it
+  returns at once; `basis-t` is nil until that finishes. It polls every
+  `:poll-interval-ms` once caught up. After a failure, connecting or stepping,
+  it backs off exponentially up to `:max-backoff-ms` (default 60 s) and exposes
+  the exception through `last-error` and `status`.
 - **Writes** use multi-row batch inserts; `reWriteBatchedInserts=true` is added
   to the PostgreSQL connection unless the `:postgres` map sets it.
 
 ### Not supported yet
 
-History or temporal tables, non-additive schema changes (type changes, renames,
-dropped columns), FK constraints, and more than one source database per process.
+History or temporal tables, FK constraints, and more than one source database
+per process. Views and other objects that depend on replicated tables block a
+snapshot (which replaces those tables); d2pg stops with an error naming the
+cause, and you must drop and recreate them around it.
 
 ## Development
 
 Tests need a local PostgreSQL. They use `jdbc:postgresql://localhost:5432/d2pg_test`
 (created if missing); set `D2PG_TEST_JDBC_URL` to override. Datomic Local runs in
-memory.
+memory. `compose.yaml` starts the same PostgreSQL CI uses:
 
 ```sh
-clojure -M:test
+docker compose up -d
+D2PG_TEST_JDBC_URL='jdbc:postgresql://localhost:5432/d2pg_test?user=postgres&password=postgres' clojure -M:test
+clojure -M:lint
 ```
 
-CI runs the same suite against a PostgreSQL service container; see
-`.github/workflows/test.yml`.
+CI lints, runs the suite against a PostgreSQL service container and builds the
+uberjar; see `.github/workflows/test.yml`.
 
 ## License
 

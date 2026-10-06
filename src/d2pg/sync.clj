@@ -22,21 +22,28 @@
   (for [v (get pulled attr)]
     [(:db/id pulled) (types/->jdbc value-type as v)]))
 
-(defn- apply-batch! [conn pg-schema table pulled]
-  (let [{members true others false} (group-by #(schema/member? table %) pulled)
+(defn sync-batch!
+  "Brings the rows for eids in table into line with db. With :fresh?, the
+  table is known to hold none of them, so nothing needs deleting."
+  [conn db {:keys [pg-schema] :as model} table-key eids {:keys [fresh?]}]
+  (let [table (get-in model [:tables table-key])
+        ;; Entities with none of the pattern's attrs still pull as {:db/id e},
+        ;; so every eid comes back and non-members get deleted.
+        pulled (pull-many db (:pull-pattern table) eids)
+        {members true others false} (group-by #(schema/member? table %) pulled)
         member-ids (map :db/id members)]
-    (pg/delete-rows! conn pg-schema table (map :db/id others))
+    (when-not fresh?
+      (pg/delete-rows! conn pg-schema table (map :db/id others)))
     (pg/upsert-rows! conn pg-schema table (map #(row table %) members))
-    (doseq [jt (:join-tables table)]
-      (pg/replace-join-values! conn pg-schema jt member-ids
-                               (mapcat #(join-rows jt %) members)))))
+    (doseq [jt (:join-tables table)
+            :let [rows (mapcat #(join-rows jt %) members)]]
+      (if fresh?
+        (pg/insert-join-values! conn pg-schema jt rows)
+        (pg/replace-join-values! conn pg-schema jt member-ids rows)))))
 
 (defn sync-entities!
-  "Brings the rows for eids in table into line with db. conn should be a
+  "sync-batch! over eids in batches of batch-size. conn should be a
   PostgreSQL connection inside a transaction."
-  [conn db {:keys [pg-schema] :as model} table-key eids batch-size]
-  (let [table (get-in model [:tables table-key])]
-    (doseq [batch (partition-all batch-size eids)]
-      ;; Entities with none of the pattern's attrs still pull as {:db/id e},
-      ;; so every eid comes back and non-members get deleted.
-      (apply-batch! conn pg-schema table (pull-many db (:pull-pattern table) batch)))))
+  [conn db model table-key eids batch-size]
+  (doseq [batch (partition-all batch-size eids)]
+    (sync-batch! conn db model table-key batch {})))

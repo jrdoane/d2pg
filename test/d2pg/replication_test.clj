@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [d2pg.core :as core]
             [d2pg.test-util :as tu :refer [query tx!]]
-            [datomic.client.api :as d])
+            [datomic.client.api :as d]
+            [next.jdbc :as jdbc])
   (:import (java.net URI)
            (java.util Date UUID)))
 
@@ -308,6 +309,7 @@
   (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
         rep (core/start! (assoc (tu/config client-config tables) :max-backoff-ms 100))]
     (try
+      (is (wait-until #(core/basis-t rep)) "start! snapshots in the background")
       (tx! conn [{:person/email "bg@x.org" :person/name "fine"}])
       (is (wait-until #(some? (person "bg@x.org"))))
       (is (nil? (core/last-error rep)))
@@ -322,3 +324,160 @@
           (is (wait-until #(and (nil? (core/last-error rep))
                                 (= "fine again" (:name (person "bg@x.org"))))))))
       (finally (core/stop! rep)))))
+
+(deftest long-names-do-not-force-a-rebuild
+  (let [{:keys [client-config]}
+        (tu/fresh-datomic
+         [{:db/ident :item/name :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
+          {:db/ident :item/an-extraordinarily-long-attribute-name-that-overflows-postgres
+           :db/valueType :db.type/string :db/cardinality :db.cardinality/many}])
+        cfg (tu/config client-config {:item {:attrs [:item/*]}})]
+    (core/replicator cfg)
+    (query "INSERT INTO $s.item (db_id) VALUES (-1)")
+    (core/replicator cfg)
+    (is (= 1 (count (query "SELECT * FROM $s.item WHERE db_id = -1"))))))
+
+(deftest wildcard-conflicts-do-not-stall-the-tail
+  (let [{:keys [client-config conn]}
+        (tu/fresh-datomic (conj schema-tx {:db/ident :person/active? :db/valueType :db.type/boolean
+                                           :db/cardinality :db.cardinality/one}))
+        rep (core/replicator (tu/config client-config tables))]
+    ;; Both attributes derive the column name "active".
+    (tx! conn [{:db/ident :person/active :db/valueType :db.type/boolean
+                :db/cardinality :db.cardinality/one}])
+    (tx! conn [{:person/email "a@x.org" :person/active? true :person/active false}])
+    (is (= 2 (core/catch-up! rep)))
+    (testing "the column keeps replicating the attribute that had it first"
+      (is (true? (:active (person "a@x.org")))))))
+
+(deftest schema-read-and-snapshot-share-one-db
+  ;; An attribute installed (and used) between reading the schema and
+  ;; taking the snapshot must still be replicated.
+  (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
+        db d/db
+        calls (atom 0)
+        rep (with-redefs [d/db (fn [c]
+                                 (let [v (db c)]
+                                   (when (= 1 (swap! calls inc))
+                                     (tx! conn [{:db/ident :person/nickname :db/valueType :db.type/string
+                                                 :db/cardinality :db.cardinality/one}])
+                                     (tx! conn [{:person/email "n@x.org" :person/nickname "Nico"}]))
+                                   v))]
+              (core/replicator (tu/config client-config tables)))]
+    (core/catch-up! rep)
+    (is (= "Nico" (:nickname (person "n@x.org"))))))
+
+(deftest non-additive-schema-changes-rebuild
+  (let [{:keys [client-config conn]} (tu/fresh-datomic
+                                     (conj schema-tx {:db/ident :person/nickname :db/valueType :db.type/string
+                                                      :db/cardinality :db.cardinality/one}))
+        cfg (tu/config client-config tables)
+        rep (core/replicator cfg)]
+    (tx! conn [{:person/email "n@x.org" :person/nickname "Nico"}])
+    (core/catch-up! rep)
+    (testing "a cardinality change while tailing"
+      (tx! conn [[:db/add :person/nickname :db/cardinality :db.cardinality/many]])
+      (tx! conn [[:db/add [:person/email "n@x.org"] :person/nickname "Nic"]])
+      (core/catch-up! rep)
+      (is (not (contains? (person "n@x.org") :nickname)))
+      (is (= #{"Nico" "Nic"} (set (map :value (query "SELECT value FROM $s.person_nickname"))))))
+    (testing "an attribute renamed while stopped"
+      (tx! conn [{:db/id :person/nickname :db/ident :person/alias}])
+      (core/catch-up! (core/replicator cfg))
+      (is (contains? (table-names) "person_alias"))
+      (is (not (contains? (table-names) "person_nickname")))
+      (is (= #{"Nico" "Nic"} (set (map :value (query "SELECT value FROM $s.person_alias"))))))))
+
+(deftest renamed-enums-update-ident-columns
+  (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)]
+    (tx! conn [{:person/email "e@x.org" :person/status :status/active :person/roles [:role/admin]}])
+    (let [rep (core/replicator (tu/config client-config tables))]
+      (tx! conn [{:db/id :status/active :db/ident :status/enabled}
+                 {:db/id :role/admin :db/ident :role/owner}])
+      (core/catch-up! rep)
+      (let [row (person "e@x.org")]
+        (is (= "status/enabled" (:status row)))
+        (is (= ["role/owner"] (map :value (query "SELECT value FROM $s.person_roles WHERE db_id = ?"
+                                                 (:db_id row)))))))))
+
+(deftest a-different-source-database-is-refused
+  (let [a (tu/fresh-datomic schema-tx)
+        b (tu/fresh-datomic schema-tx)]
+    (core/replicator (tu/config (:client-config a) tables))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"was replicating Datomic database"
+                          (core/replicator (tu/config (:client-config b) tables))))))
+
+(deftest a-second-instance-cannot-advance-the-checkpoint
+  (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
+        cfg (tu/config client-config tables)
+        a (core/replicator cfg)
+        b (core/replicator cfg)]
+    (tx! conn [{:person/email "a@x.org"}])
+    (is (= 1 (core/step! a)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"another instance"
+                          (core/step! b)))))
+
+(deftest snapshots-never-replace-tables-they-did-not-create
+  (let [{:keys [client-config]} (tu/fresh-datomic schema-tx)
+        cfg (tu/config client-config tables)]
+    (testing "a table that already existed"
+      (query "CREATE SCHEMA $s")
+      (query "CREATE TABLE $s.address (precious text)")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not create"
+                            (core/replicator cfg)))
+      (is (= #{"address" "d2pg_checkpoint"} (table-names)))
+      (query "DROP TABLE $s.address"))
+    (testing "another replicator's table"
+      (core/replicator cfg)
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not create"
+                            (core/replicator (assoc cfg :replicator-id "other")))))))
+
+(deftest unrelated-schema-changes-do-not-lock-tables
+  (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
+        rep (core/replicator (tu/config client-config tables))]
+    (with-open [reader (jdbc/get-connection @tu/ds)]
+      ;; A long-running reader: DDL on person would wait for it.
+      (.setAutoCommit reader false)
+      (jdbc/execute! reader [(str "LOCK TABLE \"" tu/pg-schema "\".person IN ACCESS SHARE MODE")])
+      (tx! conn [{:db/ident :other/thing :db/valueType :db.type/string
+                  :db/cardinality :db.cardinality/one}])
+      (is (= 1 (deref (future (core/step! rep)) 5000 :blocked)))
+      (.rollback reader))))
+
+(deftest views-on-replicated-tables-block-a-rebuild-clearly
+  (let [{:keys [client-config]} (tu/fresh-datomic schema-tx)
+        cfg (tu/config client-config tables)]
+    (core/replicator cfg)
+    (query "CREATE VIEW $s.emails AS SELECT email FROM $s.person")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"depend on them"
+                          (core/replicator (assoc-in cfg [:tables :person :exclude] []))))))
+
+(deftest unknown-pg-types-are-rejected
+  (let [{:keys [client-config]} (tu/fresh-datomic schema-tx)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unknown PostgreSQL types"
+                          (core/replicator (assoc-in (tu/config client-config tables)
+                                                     [:tables :person :columns :person/age]
+                                                     {:pg-type "nonsense"}))))))
+
+(deftest start-retries-a-failed-connect
+  (let [{:keys [client-config]} (tu/fresh-datomic schema-tx)
+        rep (core/start! (assoc (tu/config client-config tables)
+                                :postgres {:jdbcUrl "jdbc:postgresql://localhost:1/nowhere"}
+                                :max-backoff-ms 100))]
+    (try
+      (is (instance? Exception (wait-until #(core/last-error rep))))
+      (is (nil? (core/basis-t rep)))
+      (is (.isAlive ^Thread (:thread rep)))
+      (finally (core/stop! rep)))))
+
+(deftest status-reports-progress
+  (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
+        rep (core/replicator (tu/config client-config tables))]
+    (tx! conn [{:person/email "s@x.org"}])
+    (core/catch-up! rep)
+    (let [{:keys [basis-t caught-up? txs-applied last-step-at error]} (core/status rep)]
+      (is (= (:t (d/db conn)) basis-t))
+      (is (true? caught-up?))
+      (is (= 1 txs-applied))
+      (is (some? last-step-at))
+      (is (nil? error)))))

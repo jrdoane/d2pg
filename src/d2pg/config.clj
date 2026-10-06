@@ -47,7 +47,9 @@
 (s/def ::datomic (s/keys :req-un [:d2pg.datomic/client :d2pg.datomic/db-name]))
 (s/def ::postgres map?)
 (s/def ::pg-schema ::pg-identifier)
-(s/def ::replicator-id ::non-blank-string)
+;; It names the staging schema, d2pg_staging_<id>, which must fit too.
+(s/def ::replicator-id (s/and ::non-blank-string
+                              #(pg-identifier? (str "d2pg_staging_" %))))
 (s/def ::poll-interval-ms pos-int?)
 (s/def ::batch-txs pos-int?)
 (s/def ::pull-batch-size pos-int?)

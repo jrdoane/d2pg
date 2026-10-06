@@ -189,7 +189,12 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid d2pg config"
                             (config/validate {:datomic {:client {} :db-name "x"} :postgres {}
                                               :pg-schema too-long
-                                              :tables {:person {:attrs [:person/name]}}})))))
+                                              :tables {:person {:attrs [:person/name]}}})))
+      (testing "including the staging schema a replicator id names"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid d2pg config"
+                              (config/validate {:datomic {:client {} :db-name "x"} :postgres {}
+                                                :replicator-id (subs too-long 0 51)
+                                                :tables {:person {:attrs [:person/name]}}}))))))
   (testing "unique constraint names are shortened distinctly instead of truncated"
     (let [stmts (ddl/statements (model {:gizmo {:attrs [:gizmo/*]
                                                 :name (apply str (repeat 58 "g"))}}))

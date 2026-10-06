@@ -1,23 +1,33 @@
 {:paths ["src"]
+ ;; The library needs a Datomic client on the classpath but leaves the choice
+ ;; to the host application: com.datomic/local, com.datomic/client-pro or
+ ;; com.datomic/client-cloud all provide datomic.client.api.
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        ;; Provides datomic.client.api. Swap for/add com.datomic/client-pro or
-        ;; com.datomic/client-cloud to replicate from those deployments.
-        com.datomic/local {:mvn/version "1.0.291"}
         com.github.seancorfield/next.jdbc {:mvn/version "1.3.1048"}
         org.postgresql/postgresql {:mvn/version "42.7.8"}
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.clojure/tools.logging {:mvn/version "1.3.0"}}
  :aliases
- {;; The library leaves the logging backend to the host application. These
+ {;; Datomic Local as the client, for running standalone and for tests.
+  :local {:extra-deps {com.datomic/local {:mvn/version "1.0.291"}}}
+  ;; The library leaves the logging backend to the host application. These
   ;; aliases add a simple SLF4J backend for running and testing it standalone.
-  :run {:extra-deps {org.slf4j/slf4j-simple {:mvn/version "2.0.17"}}
+  :run {:extra-deps {com.datomic/local {:mvn/version "1.0.291"}
+                     org.slf4j/slf4j-simple {:mvn/version "2.0.17"}}
         :jvm-opts ["-Dorg.slf4j.simpleLogger.defaultLogLevel=info"
                    "-Dorg.slf4j.simpleLogger.showDateTime=true"
                    "-Dorg.slf4j.simpleLogger.dateTimeFormat=yyyy-MM-dd HH:mm:ss"]
         :main-opts ["-m" "d2pg"]}
   :test {:extra-paths ["test"]
-         :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
+         :extra-deps {com.datomic/local {:mvn/version "1.0.291"}
+                      io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                       org.slf4j/slf4j-simple {:mvn/version "2.0.17"}}
          :jvm-opts ["-Dorg.slf4j.simpleLogger.defaultLogLevel=warn"]
          :main-opts ["-m" "cognitect.test-runner"]
-         :exec-fn cognitect.test-runner.api/test}}}
+         :exec-fn cognitect.test-runner.api/test}
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2026.05.25"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test" "build.clj"]}
+  ;; clojure -T:build jar   -> the library, with a pom
+  ;; clojure -T:build uber  -> a standalone CLI with Datomic Local and SLF4J
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
+          :ns-default build}}}

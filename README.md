@@ -13,9 +13,10 @@ source Datomic database. It takes an initial snapshot, then tails the
 transaction log, keeping PostgreSQL at the **current state** of the source.
 
 The source is reached through the Datomic **Client API**, so it works with
-Datomic Local, Datomic Cloud, and Datomic Pro via peer-server. `deps.edn`
-includes `com.datomic/local`; add `com.datomic/client-pro` or
-`com.datomic/client-cloud` for those deployments.
+Datomic Local, Datomic Cloud, and Datomic Pro via peer-server. The library
+doesn't pick a client: add `com.datomic/local`, `com.datomic/client-pro` or
+`com.datomic/client-cloud` to your application. The `:run`, `:local` and
+`:test` aliases use Datomic Local.
 
 ## Running
 
@@ -23,10 +24,20 @@ includes `com.datomic/local`; add `com.datomic/client-pro` or
 clojure -M:run example/config.edn
 ```
 
-The `:run` alias adds a simple SLF4J logging backend. The library itself
-logs through `clojure.tools.logging` and leaves the backend to the host
-application, so `clojure -M -m d2pg example/config.edn` also works and falls
-back to `java.util.logging`.
+The `:run` alias adds Datomic Local and a simple SLF4J logging backend. The
+library itself logs through `clojure.tools.logging` and leaves the backend to
+the host application, so `clojure -M:local -m d2pg example/config.edn` also
+works and falls back to `java.util.logging`.
+
+To build a standalone jar (Datomic Local and SLF4J included):
+
+```sh
+clojure -T:build uber
+java -jar target/d2pg-0.1.<n>-standalone.jar example/config.edn
+```
+
+`clojure -T:build jar` builds the library jar and pom. Versions are
+`0.1.<commit count>`.
 
 Or embed it:
 
@@ -141,14 +152,16 @@ cause, and you must drop and recreate them around it.
 
 Tests need a local PostgreSQL. They use `jdbc:postgresql://localhost:5432/d2pg_test`
 (created if missing); set `D2PG_TEST_JDBC_URL` to override. Datomic Local runs in
-memory.
+memory. `compose.yaml` starts the same PostgreSQL CI uses:
 
 ```sh
-clojure -M:test
+docker compose up -d
+D2PG_TEST_JDBC_URL='jdbc:postgresql://localhost:5432/d2pg_test?user=postgres&password=postgres' clojure -M:test
+clojure -M:lint
 ```
 
-CI runs the same suite against a PostgreSQL service container; see
-`.github/workflows/test.yml`.
+CI lints, runs the suite against a PostgreSQL service container and builds the
+uberjar; see `.github/workflows/test.yml`.
 
 ## License
 

@@ -351,21 +351,21 @@
       (is (true? (:active (person "a@x.org")))))))
 
 (deftest schema-read-and-snapshot-share-one-db
+  ;; An attribute installed (and used) between reading the schema and
+  ;; taking the snapshot must still be replicated.
   (let [{:keys [client-config conn]} (tu/fresh-datomic schema-tx)
         db d/db
-        calls (atom 0)]
-    ;; An attribute installed (and used) between reading the schema and
-    ;; taking the snapshot must still be replicated.
-    (let [rep (with-redefs [d/db (fn [c]
-                                   (let [v (db c)]
-                                     (when (= 1 (swap! calls inc))
-                                       (tx! conn [{:db/ident :person/nickname :db/valueType :db.type/string
-                                                   :db/cardinality :db.cardinality/one}])
-                                       (tx! conn [{:person/email "n@x.org" :person/nickname "Nico"}]))
-                                     v))]
-                (core/replicator (tu/config client-config tables)))]
-      (core/catch-up! rep)
-      (is (= "Nico" (:nickname (person "n@x.org")))))))
+        calls (atom 0)
+        rep (with-redefs [d/db (fn [c]
+                                 (let [v (db c)]
+                                   (when (= 1 (swap! calls inc))
+                                     (tx! conn [{:db/ident :person/nickname :db/valueType :db.type/string
+                                                 :db/cardinality :db.cardinality/one}])
+                                     (tx! conn [{:person/email "n@x.org" :person/nickname "Nico"}]))
+                                   v))]
+              (core/replicator (tu/config client-config tables)))]
+    (core/catch-up! rep)
+    (is (= "Nico" (:nickname (person "n@x.org"))))))
 
 (deftest non-additive-schema-changes-rebuild
   (let [{:keys [client-config conn]} (tu/fresh-datomic

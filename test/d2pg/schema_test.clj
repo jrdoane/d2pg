@@ -6,11 +6,19 @@
             [d2pg.ddl :as ddl]
             [d2pg.schema :as schema]))
 
-(defn- attr [ident value-type & {:keys [many unique]}]
+(defn- attr [ident value-type & {:keys [many unique id]}]
   [ident {:ident ident
+          :id id
           :value-type value-type
           :cardinality (if many :db.cardinality/many :db.cardinality/one)
           :unique unique}])
+
+(def long-attr
+  "Its join table name, widget_<62 chars>, exceeds PostgreSQL's 63 bytes."
+  :widget/an-extraordinarily-long-attribute-name-that-overflows-postgres)
+
+(defn- fits? [s]
+  (<= (count (.getBytes ^String s "UTF-8")) 63))
 
 (def test-schema
   {:attrs (into {} [(attr :person/name :db.type/string)
@@ -21,7 +29,16 @@
                     (attr :person/tags :db.type/string :many true)
                     (attr :address/street :db.type/string)
                     (attr :address/name :db.type/string)
-                    (attr :order/name :db.type/string)])})
+                    (attr :order/name :db.type/string)
+                    ;; Ids give installation order, which settles wildcard conflicts.
+                    (attr :widget/name :db.type/string :id 10)
+                    (attr :widget/active? :db.type/boolean :id 11)
+                    (attr :widget/active :db.type/boolean :id 12)
+                    (attr :widget/blob :db.type/fancy :id 13)
+                    (attr :widget/parts :db.type/string :many true :id 14)
+                    (attr long-attr :db.type/string :many true :id 15)
+                    (attr :gizmo/code-a :db.type/string :unique :db.unique/value)
+                    (attr :gizmo/code-b :db.type/string :unique :db.unique/value)])})
 
 (defn- model [tables]
   (schema/resolve-model (config/validate {:datomic {:client {} :db-name "x"}
@@ -120,3 +137,62 @@
     (is (not= (core/mapping-hash cfg) (core/mapping-hash (assoc cfg :pg-schema "other"))))
     (is (not= (core/mapping-hash cfg)
               (core/mapping-hash (assoc-in cfg [:tables :person :columns :person/name :name] "m"))))))
+
+(deftest wildcards-skip-attributes-they-cannot-map
+  (let [m (model {:widget {:attrs [:widget/*]}
+                  :parts {:attrs [:order/name] :name "widget_parts"}})
+        widget (get-in m [:tables :widget])]
+    (is (= #{:widget/name :widget/active?} (:attrs widget)))
+    (testing "the attribute installed first keeps a contested column"
+      (is (= [[:widget/active? "active"] [:widget/name "name"]]
+             (map (juxt :attr :column) (:columns widget)))))
+    (testing "collisions, unsupported types and over-long names are skipped"
+      (is (= #{:widget/active :widget/blob :widget/parts long-attr}
+             (set (map :attr (:skipped m)))))
+      (is (empty? (:join-tables widget)))
+      (is (not (contains? (:attr->tables m) :widget/active))))))
+
+(deftest named-attributes-take-precedence-and-fail-loudly
+  (testing "an attribute named in :attrs or :require wins a contested column"
+    (doseq [table [{:attrs [:widget/* :widget/active]}
+                   {:attrs [:widget/*] :require [:widget/active]}]]
+      (let [widget (get-in (model {:widget table}) [:tables :widget])]
+        (is (= [:widget/active "active"]
+               ((juxt :attr :column) (first (filter #(= "active" (:column %)) (:columns widget))))))
+        (is (not (contains? (:attrs widget) :widget/active?))))))
+  (testing "a named attribute that cannot be mapped is an error"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Duplicate column \"active\""
+                          (model {:widget {:attrs [:widget/active? :widget/active]}})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unsupported Datomic value type"
+                          (model {:widget {:attrs [:widget/blob]}})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unsupported Datomic value type"
+                          (model {:widget {:attrs [:widget/*] :columns {:widget/blob {:name "b"}}}})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"63-byte"
+                          (model {:widget {:attrs [long-attr]}})))))
+
+(deftest long-identifiers
+  (testing "a :name override shortens a join table name"
+    (is (= ["widget_long"]
+           (map :join-table (get-in (model {:widget {:attrs [long-attr]
+                                                     :columns {long-attr {:name "long"}}}})
+                                    [:tables :widget :join-tables])))))
+  (testing "a derived table name that is too long is an error"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"63-byte"
+                          (model {(keyword (apply str (repeat 64 "t"))) {:attrs [:order/name]}}))))
+  (testing "names given in config must fit"
+    (let [too-long (apply str (repeat 64 "x"))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid d2pg config"
+                            (model {:person {:attrs [:person/name] :name too-long}})))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid d2pg config"
+                            (model {:person {:attrs [:person/name]
+                                             :columns {:person/name {:name too-long}}}})))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid d2pg config"
+                            (config/validate {:datomic {:client {} :db-name "x"} :postgres {}
+                                              :pg-schema too-long
+                                              :tables {:person {:attrs [:person/name]}}})))))
+  (testing "unique constraint names are shortened distinctly instead of truncated"
+    (let [stmts (ddl/statements (model {:gizmo {:attrs [:gizmo/*]
+                                                :name (apply str (repeat 58 "g"))}}))
+          names (keep #(second (re-find #"ADD CONSTRAINT \"([^\"]+)\"" %)) stmts)]
+      (is (= 2 (count (distinct names))))
+      (is (every? fits? names)))))

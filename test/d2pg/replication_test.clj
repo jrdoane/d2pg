@@ -322,3 +322,28 @@
           (is (wait-until #(and (nil? (core/last-error rep))
                                 (= "fine again" (:name (person "bg@x.org"))))))))
       (finally (core/stop! rep)))))
+
+(deftest long-names-do-not-force-a-rebuild
+  (let [{:keys [client-config]}
+        (tu/fresh-datomic
+         [{:db/ident :item/name :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
+          {:db/ident :item/an-extraordinarily-long-attribute-name-that-overflows-postgres
+           :db/valueType :db.type/string :db/cardinality :db.cardinality/many}])
+        cfg (tu/config client-config {:item {:attrs [:item/*]}})]
+    (core/replicator cfg)
+    (query "INSERT INTO $s.item (db_id) VALUES (-1)")
+    (core/replicator cfg)
+    (is (= 1 (count (query "SELECT * FROM $s.item WHERE db_id = -1"))))))
+
+(deftest wildcard-conflicts-do-not-stall-the-tail
+  (let [{:keys [client-config conn]}
+        (tu/fresh-datomic (conj schema-tx {:db/ident :person/active? :db/valueType :db.type/boolean
+                                           :db/cardinality :db.cardinality/one}))
+        rep (core/replicator (tu/config client-config tables))]
+    ;; Both attributes derive the column name "active".
+    (tx! conn [{:db/ident :person/active :db/valueType :db.type/boolean
+                :db/cardinality :db.cardinality/one}])
+    (tx! conn [{:person/email "a@x.org" :person/active? true :person/active false}])
+    (is (= 2 (core/catch-up! rep)))
+    (testing "the column keeps replicating the attribute that had it first"
+      (is (true? (:active (person "a@x.org")))))))

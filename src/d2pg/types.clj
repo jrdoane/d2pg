@@ -24,14 +24,13 @@
    :db.type/tuple   "jsonb"})
 
 (defn pg-type
-  "PostgreSQL type for a resolved attribute. `as` is the column's :as
-  override (currently only :ident, which renders refs as their ident text)."
+  "PostgreSQL type for a resolved attribute, or nil if its value type is not
+  supported. `as` is the column's :as override (currently only :ident, which
+  renders refs as their ident text)."
   [value-type as]
   (if (= :ident as)
     "text"
-    (or (value-type->pg-type value-type)
-        (throw (ex-info (str "Unsupported Datomic value type " value-type)
-                        {:type ::unsupported-value-type :value-type value-type})))))
+    (value-type->pg-type value-type)))
 
 (defn keyword->text
   "Renders :ns/name as \"ns/name\"."

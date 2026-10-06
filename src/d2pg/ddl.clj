@@ -3,6 +3,7 @@
   can be re-run safely, so the same statements both create a fresh target and
   evolve an existing one additively (new attributes -> new columns)."
   (:require [clojure.string :as str]
+            [d2pg.config :as config]
             [d2pg.schema :as schema]))
 
 (defn quote-ident [s]
@@ -22,12 +23,25 @@
              t (cons sql-name (map :join-table join-tables))]
          t)))
 
+(defn- constraint-name
+  "table_column_key, or when that is too long for an identifier, a prefix of
+  it plus a hash of the whole. PostgreSQL would truncate it instead, which
+  can give two constraints one name, and the second would never be added."
+  [table column]
+  (let [full (str table "_" column "_key")
+        suffix (format "_%08x" (.hashCode full))]
+    (if (config/pg-identifier? full)
+      full
+      (loop [prefix (subs full 0 (- config/max-identifier-bytes (count suffix)))]
+        (let [n (str prefix suffix)]
+          (if (config/pg-identifier? n) n (recur (subs prefix 0 (dec (count prefix))))))))))
+
 (defn- unique-constraint
   "Adds a deferred unique constraint unless it already exists. Deferred so
   that values moving between entities inside one transaction don't collide
   mid-apply."
   [pg-schema table column]
-  (let [constraint (str table "_" column "_key")]
+  (let [constraint (constraint-name table column)]
     (str "DO $$ BEGIN "
          "ALTER TABLE " (qualified pg-schema table)
          " ADD CONSTRAINT " (quote-ident constraint)

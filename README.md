@@ -51,7 +51,7 @@ explicit; each one lists attribute patterns:
 
 | Key | Meaning |
 |---|---|
-| `:attrs` | Attributes to map. `:ns/*` selects every attribute in a namespace, including ones installed later. |
+| `:attrs` | Attributes to map. `:ns/*` selects every attribute in a namespace, including ones installed later (see [Wildcards](#wildcards)). |
 | `:exclude` | Attributes to drop after expanding `:attrs`. |
 | `:require` | Only entities that have **all** of these get a row. Without it, any mapped attribute is enough. |
 | `:columns` | Per-attribute overrides: `:name` (column name), `:as :ident` (render an enum ref as its ident text), `:pg-type` (any PostgreSQL type the natural type casts to, e.g. `"date"` for an instant or `"text"` for a long). |
@@ -62,7 +62,9 @@ explicit; each one lists attribute patterns:
 - **Primary key**: `db_id bigint`, the Datomic entity id.
 - **Column names**: snake_case of the attribute name (`:person/is-active?` → `is_active`).
   Attributes from a different namespace than the table are prefixed (`:address/street` in
-  `:person` → `address_street`). Collisions are reported at startup.
+  `:person` → `address_street`). Collisions are reported at startup. Table, column
+  and join table names must fit PostgreSQL's 63-byte identifier limit rather than
+  be silently truncated; use a `:name` override to shorten one.
 - **Types**: string/keyword/symbol/uri → `text`, long/ref → `bigint`, boolean → `boolean`,
   instant → `timestamptz`, uuid → `uuid`, double → `double precision`, float → `real`,
   bigint/bigdec → `numeric`, bytes → `bytea` (Datomic Pro only), tuple → `jsonb`.
@@ -71,6 +73,17 @@ explicit; each one lists attribute patterns:
 - **Cardinality many** → join table `<table>_<column>(db_id, value)`.
 - **`:db/unique`** → a deferred `UNIQUE` constraint.
 - Refs are plain `bigint` columns; there are no foreign key constraints.
+
+### Wildcards
+
+An attribute named in `:attrs`, `:columns` or `:require` must map cleanly, or
+startup fails. An attribute that only a `:ns/*` wildcard matches is skipped
+with a warning if it can't be mapped: its column name collides with another,
+its name is too long, or its value type is unsupported. That way an attribute
+installed in the source never stops replication. Named attributes claim names
+first; among wildcard matches, the attribute installed first keeps a contested
+name, so a new attribute never takes over a column already being replicated.
+Add a `:columns` override or an `:exclude` to map or silence a skipped one.
 
 ## How it works
 

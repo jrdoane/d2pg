@@ -3,17 +3,28 @@
   attributes to PostgreSQL tables, expressed as data."
   (:require [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
-            [clojure.string :as str]))
+            [clojure.string :as str])
+  (:import (java.nio.charset StandardCharsets)))
 
 (defn wildcard?
   "True for attribute patterns like :person/* that select a whole namespace."
   [k]
   (and (qualified-keyword? k) (= "*" (name k))))
 
+(def max-identifier-bytes
+  "PostgreSQL silently truncates longer identifiers (NAMEDATALEN - 1)."
+  63)
+
+(defn pg-identifier?
+  "Does s fit in a PostgreSQL identifier without being truncated?"
+  [s]
+  (<= (count (.getBytes ^String s StandardCharsets/UTF_8)) max-identifier-bytes))
+
 (s/def ::attr qualified-keyword?)
 (s/def ::non-blank-string (s/and string? (complement str/blank?)))
+(s/def ::pg-identifier (s/and ::non-blank-string pg-identifier?))
 
-(s/def :d2pg.column/name ::non-blank-string)
+(s/def :d2pg.column/name ::pg-identifier)
 (s/def :d2pg.column/as #{:ident})
 (s/def :d2pg.column/pg-type ::non-blank-string)
 (s/def ::column-override
@@ -23,7 +34,7 @@
 (s/def :d2pg.table/exclude (s/coll-of ::attr :kind sequential?))
 (s/def :d2pg.table/require (s/coll-of ::attr :kind sequential? :min-count 1))
 (s/def :d2pg.table/columns (s/map-of ::attr ::column-override))
-(s/def :d2pg.table/name ::non-blank-string)
+(s/def :d2pg.table/name ::pg-identifier)
 (s/def ::table
   (s/keys :req-un [:d2pg.table/attrs]
           :opt-un [:d2pg.table/exclude :d2pg.table/require
@@ -35,7 +46,7 @@
 (s/def :d2pg.datomic/db-name ::non-blank-string)
 (s/def ::datomic (s/keys :req-un [:d2pg.datomic/client :d2pg.datomic/db-name]))
 (s/def ::postgres map?)
-(s/def ::pg-schema ::non-blank-string)
+(s/def ::pg-schema ::pg-identifier)
 (s/def ::replicator-id ::non-blank-string)
 (s/def ::poll-interval-ms pos-int?)
 (s/def ::batch-txs pos-int?)
